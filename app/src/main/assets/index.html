@@ -372,7 +372,7 @@ function draw(dt){
     }
     if (col.length > 3){
       ctx.font = '700 13px system-ui'; ctx.fillStyle = '#8a6440'; ctx.textAlign = 'center';
-      ctx.fillText('あと' + (col.length - 3), c.x + c.s/2, c.y + c.s * 2.9 + 4);
+      ctx.textBaseline = 'top'; ctx.fillText('あと' + (col.length - 3), c.x + c.s/2, c.y + c.s * 2.9 + 8);
     }
   });
   // 残り

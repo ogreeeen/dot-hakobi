@@ -18,7 +18,7 @@
   .card img{width:100%;image-rendering:pixelated;border-radius:8px;margin-bottom:14px}
   .card button{display:block;width:100%;height:48px;margin-top:10px;border:none;border-radius:24px;font-size:17px;font-weight:800;color:#fff;background:#f08a24;box-shadow:0 4px 0 #b55f0c}
   .card button.sub{background:#8a7bd8;box-shadow:0 4px 0 #5b4daa}
-  #file{display:none}
+  #file,#cam{display:none}
   .crop{text-align:center;color:#fff}
   .crop p{margin:0 0 10px;font-weight:700}
   #cropCv{touch-action:none;border-radius:6px;display:block;margin:0 auto}
@@ -41,6 +41,13 @@
 </div>
 <canvas id="cv"></canvas>
 <input type="file" id="file" accept="image/*">
+<input type="file" id="cam" accept="image/*" capture="environment">
+<div class="ov" id="startOv"><div class="card">
+  <h2>写真でドット絵をつくろう</h2><p>撮影するか、写真を選んでください</p>
+  <button id="startCam">📷 撮影する</button>
+  <button class="sub" id="startPick">🖼 写真を選ぶ</button>
+  <button class="sub" id="startLast" style="background:#b9a58c;box-shadow:0 4px 0 #8a765e">前回の写真で遊ぶ</button>
+</div></div>
 
 <div class="ov" id="cropOv"><div class="crop">
   <p>使いたい範囲を指でなぞって囲んでください</p>
@@ -63,7 +70,8 @@
 // ===== 設定 =====
 const COLOR_CHOICES = [4,5,6,7,8,9,10];
 const DEFAULT_COLORS = 6;
-const TICK_MS = 45;          // 1ピクセル運ぶ間隔
+const SPAWN_MS = 300;        // スロットからアリが出てくる間隔
+const ANT_SPEED = 170;       // アリの歩く速さ（px/秒）
 const COLS = 3;              // ブロックの列数
 
 const cv = document.getElementById('cv');
@@ -156,11 +164,11 @@ function exposed(cells, W, H, i){
     cells[i-1] < 0 || cells[i+1] < 0 || cells[i-W] < 0 || cells[i+W] < 0;
 }
 // 色cの運べるピクセルのうち、穴（下中央）に近いものを選ぶ
-function pickPixel(cells, W, H, c){
+function pickPixel(cells, W, H, c, res){
   let best = -1, bs = -Infinity;
   const hx = (W - 1) / 2;
   for (let i = cells.length - 1; i >= 0; i--){
-    if (cells[i] !== c || !exposed(cells, W, H, i)) continue;
+    if (cells[i] !== c || (res && res[i]) || !exposed(cells, W, H, i)) continue;
     const x = i % W, y = (i / W) | 0;
     const s = y * 4 - Math.abs(x - hx);
     if (s > bs){ bs = s; best = i; }
@@ -218,7 +226,7 @@ function newGame(pz, seed){
     cols: makeBlocks(p2, seed),
     slots: Array(Math.max(3, Math.min(7, p2.palette.length - 1))).fill(null), // 色数-1 個のスロット
     added: false,
-    fly: [], ants: [], pops: [],
+    ants: [], pops: [], res: new Uint8Array(p2.cells.length),
     over: false, won: false, acc: 0
   };
   hideOv(); layout();
@@ -268,29 +276,86 @@ cv.addEventListener('pointerdown', e => {
 });
 
 // ===== ゲーム進行 =====
-function step(){
+// 絵を迂回する道（運び出し済みのマスと盤の外周だけを通る）を探す
+function findPath(target){
+  const W = G.pz.W, H = G.pz.H, EW = W + 2, EH = H + 2;
+  const open = (ex, ey) => ex === 0 || ey === 0 || ex === EW - 1 || ey === EH - 1 || G.cells[(ey - 1) * W + (ex - 1)] < 0;
+  const tx = target % W + 1, ty = ((target / W) | 0) + 1;
+  const sx = Math.round((W - 1) / 2) + 1, sy = EH - 1;          // 穴の真上、盤の下の外周
+  const prev = new Int32Array(EW * EH).fill(-2);
+  const q = [sy * EW + sx]; prev[q[0]] = -1;
+  let found = -1;
+  for (let h = 0; h < q.length; h++){
+    const cur = q[h], cx = cur % EW, cy = (cur / EW) | 0;
+    if (Math.abs(cx - tx) + Math.abs(cy - ty) === 1){ found = cur; break; }
+    for (const [dx, dy] of [[0,-1],[-1,0],[1,0],[0,1]]){
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= EW || ny >= EH) continue;
+      const ni = ny * EW + nx;
+      if (prev[ni] !== -2 || !open(nx, ny)) continue;
+      prev[ni] = cur; q.push(ni);
+    }
+  }
+  if (found < 0) return null;
+  const cells = [];
+  for (let c = found; c !== -1; c = prev[c]) cells.push(c);
+  cells.reverse();
+  const b = L.board, pt = (ex, ey) => ({x: b.x + (ex - 1 + .5) * b.cs, y: b.y + (ey - 1 + .5) * b.cs});
+  const pts = cells.map(c => pt(c % EW, (c / EW) | 0));
+  pts.push(pt(tx, ty));
+  return pts;
+}
+function pathLen(pts){ let d = 0; for (let i = 1; i < pts.length; i++) d += Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y); return d; }
+function posOn(pts, dist){
+  for (let i = 1; i < pts.length; i++){
+    const a = pts[i-1], b = pts[i], l = Math.hypot(b.x - a.x, b.y - a.y);
+    if (dist <= l || i === pts.length - 1){
+      const t = l ? Math.min(1, dist / l) : 1;
+      return {x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, ang: Math.atan2(b.y - a.y, b.x - a.x)};
+    }
+    dist -= l;
+  }
+  const p = pts[pts.length - 1]; return {x: p.x, y: p.y, ang: 0};
+}
+
+function update(dt){
   if (!G || G.over || G.won) return;
-  let moved = false;
+  const W = G.pz.W, H = G.pz.H;
+  // スロットから0.3秒に1匹ずつアリが出発
   G.slots.forEach((s, si) => {
-    if (!s || s.n <= 0) return;
-    const i = pickPixel(G.cells, G.pz.W, G.pz.H, s.c);
-    if (i < 0) return;
-    G.cells[i] = -1; G.left--; s.n--; moved = true;
-    const b = L.board, x = i % G.pz.W, y = (i / G.pz.W) | 0;
-    const from = {x: b.x + (x + .5) * b.cs, y: b.y + (y + .5) * b.cs};
-    const slot = L.slots[si];
-    G.fly.push({x0: from.x, y0: from.y, x1: L.hole.x + (Math.random() - .5) * 26, y1: L.hole.y, t: 0, c: s.c,
-                ax: slot.x + slot.s / 2, ay: slot.y, size: b.cs});
+    if (!s || s.n <= 0 || s.jump > 0) return;
+    s.cool = (s.cool || 0) - dt;
+    if (s.cool > 0) return;
+    const i = pickPixel(G.cells, W, H, s.c, G.res);
+    if (i < 0){ s.cool = 0; return; }
+    const grid = findPath(i);
+    if (!grid){ s.cool = 0; return; }
+    s.cool = SPAWN_MS;
+    G.res[i] = 1; s.n--;
+    const sl = L.slots[si], hole = {x: L.hole.x, y: L.hole.y};
+    const go = [{x: sl.x + sl.s / 2, y: sl.y + 4}, hole].concat(grid);
+    const back = grid.slice().reverse().concat([hole]);
+    G.ants.push({go, back, gl: pathLen(go), bl: pathLen(back), d: 0, phase: 0, cell: i, c: s.c});
   });
   G.slots.forEach((s, i) => { if (s && s.n <= 0) G.slots[i] = null; });
-  if (G.left <= 0 && !G.fly.length){ win(); return; }
-  if (!moved && !G.fly.length) checkStuck();
+  // アリを歩かせる
+  for (const a of G.ants){
+    a.d += ANT_SPEED * dt / 1000;
+    if (a.phase === 0 && a.d >= a.gl){
+      // ピクセルを受け取って、来た道を戻る
+      G.cells[a.cell] = -1; G.res[a.cell] = 0; G.left--;
+      a.phase = 1; a.d = 0;
+    } else if (a.phase === 1 && a.d >= a.bl) a.phase = 2;
+  }
+  G.ants = G.ants.filter(a => a.phase < 2);
+  if (G.left <= 0 && !G.ants.length){ win(); return; }
+  if (!G.ants.length) checkStuck();
 }
 function checkStuck(){
   if (G.slots.includes(null)) {
     if (G.cols.some(c => c.length)) return;  // まだ置ける
   }
-  const canMove = G.slots.some(s => s && s.n > 0 && pickPixel(G.cells, G.pz.W, G.pz.H, s.c) >= 0);
+  const canMove = G.slots.some(s => s && s.n > 0 && pickPixel(G.cells, G.pz.W, G.pz.H, s.c, G.res) >= 0);
   if (canMove) return;
   G.over = true;
   $('loseAdd').style.display = (G.added || G.slots.length >= 8) ? 'none' : 'block';
@@ -357,24 +422,27 @@ function draw(dt){
   for (let i = 0; i < G.cells.length; i++){
     const v = G.cells[i]; if (v < 0) continue;
     const x = b.x + (i % W) * cs, y = b.y + ((i / W) | 0) * cs, p = G.pz.palette[v];
+    ctx.globalAlpha = G.res[i] ? .55 : 1;
     ctx.fillStyle = rgb(p, .8); ctx.fillRect(x + gap, y + gap, cs - gap, cs - gap);
     ctx.fillStyle = rgb(p); ctx.fillRect(x + gap, y + gap, cs - gap - cs*.12, cs - gap - cs*.12);
   }
+  ctx.globalAlpha = 1;
   // 穴
   ctx.fillStyle = '#7a4a2a'; ctx.beginPath(); ctx.ellipse(h.x, h.y, h.r, h.r*.62, 0, 0, Math.PI*2); ctx.fill();
   ctx.fillStyle = '#4f2d17'; ctx.beginPath(); ctx.ellipse(h.x, h.y + 3, h.r*.86, h.r*.5, 0, 0, Math.PI*2); ctx.fill();
-  // 運ばれていくピクセル（アリが運ぶ）
-  G.fly = G.fly.filter(f => f.t < 1);
-  for (const f of G.fly){
-    f.t += dt / 900;
-    const t = Math.min(1, f.t), e = t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
-    const x = f.x0 + (f.x1 - f.x0) * e, y = f.y0 + (f.y1 - f.y0) * e + Math.sin(t * Math.PI) * -20;
-    const sz = Math.max(6, f.size * (1 - t * .5));
-    const ang = Math.atan2(f.y1 - f.y0, f.x1 - f.x0);
-    drawAnt(x - Math.cos(ang) * sz * .4, y - Math.sin(ang) * sz * .4 + sz*.3, Math.max(9, sz * 1.1), ang);
-    ctx.globalAlpha = t > .9 ? (1 - t) * 10 : 1;
-    ctx.fillStyle = rgb(G.pz.palette[f.c]); ctx.fillRect(x - sz/2, y - sz/2, sz, sz);
-    ctx.globalAlpha = 1;
+  // アリ
+  const antSz = Math.max(10, Math.min(16, cs * 1.3));
+  for (const a of G.ants){
+    const p = posOn(a.phase === 0 ? a.go : a.back, a.d);
+    const wob = Math.sin(a.d * .35) * .12;
+    drawAnt(p.x, p.y, antSz, p.ang + wob);
+    if (a.phase === 1){
+      const q = Math.max(5, cs * .8);
+      ctx.fillStyle = rgb(G.pz.palette[a.c]);
+      ctx.fillRect(p.x - q/2 + Math.cos(p.ang) * antSz * .1, p.y - q/2 - antSz * .45, q, q);
+      ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1;
+      ctx.strokeRect(p.x - q/2 + Math.cos(p.ang) * antSz * .1, p.y - q/2 - antSz * .45, q, q);
+    }
   }
   // スロット
   G.slots.forEach((s, i) => {
@@ -414,10 +482,7 @@ function draw(dt){
 let last = performance.now();
 function frame(now){
   const dt = Math.min(100, now - last); last = now;
-  if (G && !G.over && !G.won){
-    G.acc += dt;
-    while (G.acc >= TICK_MS){ G.acc -= TICK_MS; step(); }
-  }
+  update(dt);
   draw(dt);
   requestAnimationFrame(frame);
 }
@@ -428,16 +493,17 @@ async function startFromSrc(src, seed){
   const img = await loadImage(src);
   newGame(pixelate(img, +opts.size, +opts.colors), seed);
 }
-async function setPhoto(file){
-  const url = URL.createObjectURL(file);
+async function setPhoto(file){ setPhotoUrl(URL.createObjectURL(file)); }
+async function setPhotoUrl(url){
+  closeStart();
   let img;
-  try { img = await loadImage(url); } catch(e){ URL.revokeObjectURL(url); return; }
+  try { img = await loadImage(url); } catch(e){ if (url.startsWith('blob:')) URL.revokeObjectURL(url); openStart(); return; }
   openCrop(img, async rect => {
     // 選んだ範囲だけを保存（最大360px）
     const m = 360, s = Math.min(1, m / Math.max(rect.w, rect.h));
     const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(rect.w * s)); c.height = Math.max(1, Math.round(rect.h * s));
     c.getContext('2d').drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, c.width, c.height);
-    URL.revokeObjectURL(url);
+    if (url.startsWith('blob:')) URL.revokeObjectURL(url);
     srcData = c.toDataURL('image/jpeg', .9);
     save('photo', srcData);
     await startFromSrc(srcData);
@@ -475,34 +541,33 @@ function openCrop(img, done){
   $('cropOk').onclick = () => finish(true);
   $('cropAll').onclick = () => finish(false);
 }
-// 写真がまだない時のサンプル絵
-function sampleSrc(){
-  const c = document.createElement('canvas'); c.width = 240; c.height = 300;
-  const x = c.getContext('2d');
-  const g = x.createLinearGradient(0, 0, 0, 300); g.addColorStop(0, '#8fd3ff'); g.addColorStop(1, '#e8f6ff');
-  x.fillStyle = g; x.fillRect(0, 0, 240, 300);
-  x.fillStyle = '#ffd23f'; x.beginPath(); x.arc(185, 60, 34, 0, 7); x.fill();
-  x.fillStyle = '#5cb85c'; x.fillRect(0, 230, 240, 70);
-  x.fillStyle = '#f4f1ea'; x.fillRect(100, 175, 40, 60);
-  x.fillStyle = '#e63946'; x.beginPath(); x.ellipse(120, 175, 70, 50, 0, Math.PI, 0); x.fill();
-  x.fillStyle = '#fff'; [[85,150,12],[130,140,15],[160,165,10]].forEach(([a,b,r]) => { x.beginPath(); x.arc(a, b, r, 0, 7); x.fill(); });
-  x.fillStyle = '#333'; x.beginPath(); x.arc(110, 200, 4, 0, 7); x.arc(130, 200, 4, 0, 7); x.fill();
-  return c.toDataURL();
+// 撮影した写真（アプリから dataURL で届く）
+window.onNativePhoto = url => { if (url) setPhotoUrl(url); else openStart(); };
+function takePhoto(){
+  closeStart();
+  if (window.Android && Android.takePhoto) Android.takePhoto(); else $('cam').click();
 }
-
-$('pick').onclick = () => $('file').click();
-$('winPick').onclick = () => { hideOv(); $('file').click(); };
+function openStart(){
+  $('startLast').style.display = load('photo', null) ? 'block' : 'none';
+  $('startOv').classList.add('on');
+}
+function closeStart(){ $('startOv').classList.remove('on'); }
+$('pick').onclick = () => openStart();
+$('startCam').onclick = () => takePhoto();
+$('startPick').onclick = () => { closeStart(); $('file').click(); };
+$('startLast').onclick = () => { closeStart(); srcData = load('photo', null); startFromSrc(srcData); };
+$('cam').onchange = e => { const f = e.target.files[0]; if (f) setPhoto(f); else openStart(); e.target.value = ''; };
+$('winPick').onclick = () => { hideOv(); openStart(); };
 $('file').onchange = e => { const f = e.target.files[0]; if (f) setPhoto(f); e.target.value = ''; };
-selColors.onchange = () => { opts.colors = +selColors.value; save('opts', opts); startFromSrc(srcData); };
-$('size').onchange = () => { opts.size = +$('size').value; save('opts', opts); startFromSrc(srcData); };
+selColors.onchange = () => { opts.colors = +selColors.value; save('opts', opts); srcData && startFromSrc(srcData); };
+$('size').onchange = () => { opts.size = +$('size').value; save('opts', opts); srcData && startFromSrc(srcData); };
 $('retry').onclick = () => G && newGame(G.pz, G.seed);
 $('winRetry').onclick = () => newGame(G.pz);
 $('loseRetry').onclick = () => newGame(G.pz, G.seed);
 $('loseAdd').onclick = () => { G.added = true; G.slots.push(null); G.over = false; hideOv(); layout(); };
 window.addEventListener('resize', layout);
 
-srcData = load('photo', null) || sampleSrc();
-startFromSrc(srcData);
+openStart();
 requestAnimationFrame(frame);
 </script>
 </body>

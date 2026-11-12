@@ -333,8 +333,13 @@ function update(dt){
     s.cool = SPAWN_MS;
     G.res[i] = 1; s.n--;
     const sl = L.slots[si], hole = {x: L.hole.x, y: L.hole.y};
-    const go = [{x: sl.x + sl.s / 2, y: sl.y + 4}, hole].concat(grid);
-    const back = grid.slice().reverse().concat([hole]);
+    // 行き：穴の横を回り込んで盤へ（穴には入らない）／帰り：来た道を戻って穴へ
+    const side = (sl.x + sl.s / 2) < L.hole.x ? -1 : 1;
+    const by = L.board.y + L.board.h + L.board.cs * .5;
+    const around = [{x: L.hole.x + side * (L.hole.r + 18), y: L.hole.y + L.hole.r * .2},
+                    {x: L.hole.x + side * (L.hole.r + 10), y: by + (L.hole.y - by) * .35}];
+    const go = [{x: sl.x + sl.s / 2, y: sl.y + 4}].concat(around, grid);
+    const back = grid.slice().reverse().concat([{x: L.hole.x, y: by}, hole]);
     G.ants.push({go, back, gl: pathLen(go), bl: pathLen(back), d: 0, phase: 0, cell: i, c: s.c});
   });
   G.slots.forEach((s, i) => { if (s && s.n <= 0) G.slots[i] = null; });

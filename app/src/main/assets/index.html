@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ドットはこび</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#f3d3a9;font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  #bar{position:fixed;top:0;left:0;right:0;height:52px;display:flex;align-items:center;gap:8px;padding:0 10px;box-sizing:border-box;z-index:2}
+  #bar button,#bar select{height:36px;border:none;border-radius:18px;background:#fff8ee;color:#5a3d1e;font-size:15px;font-weight:700;padding:0 12px;box-shadow:0 2px 0 #c99b66}
+  #bar .sp{flex:1}
+  #cv{position:fixed;top:52px;left:0;width:100%;height:calc(100% - 52px);touch-action:none}
+  .ov{position:fixed;inset:0;background:rgba(60,35,10,.55);display:none;align-items:center;justify-content:center;z-index:5}
+  .ov.on{display:flex}
+  .card{background:#fff8ee;border-radius:24px;padding:24px 22px;text-align:center;width:min(82vw,340px);box-shadow:0 6px 0 #c99b66}
+  .card h2{margin:0 0 8px;color:#5a3d1e;font-size:26px}
+  .card p{margin:0 0 16px;color:#7a5a36}
+  .card img{width:100%;image-rendering:pixelated;border-radius:8px;margin-bottom:14px}
+  .card button{display:block;width:100%;height:48px;margin-top:10px;border:none;border-radius:24px;font-size:17px;font-weight:800;color:#fff;background:#f08a24;box-shadow:0 4px 0 #b55f0c}
+  .card button.sub{background:#8a7bd8;box-shadow:0 4px 0 #5b4daa}
+  #file{display:none}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="pick">📷 写真</button>
+  <select id="colors"></select>
+  <select id="size">
+    <option value="20">粗い</option>
+    <option value="28" selected>ふつう</option>
+    <option value="36">細かい</option>
+  </select>
+  <span class="sp"></span>
+  <button id="retry">↻</button>
+</div>
+<canvas id="cv"></canvas>
+<input type="file" id="file" accept="image/*">
+
+<div class="ov" id="winOv"><div class="card">
+  <h2>クリア！</h2><img id="winImg" alt="">
+  <button id="winRetry">もう一度</button>
+  <button class="sub" id="winPick">別の写真で遊ぶ</button>
+</div></div>
+<div class="ov" id="loseOv"><div class="card">
+  <h2>スロットがいっぱい</h2><p>運べる色がなくなりました</p>
+  <button id="loseAdd">スロットを1つ増やす（1回だけ）</button>
+  <button class="sub" id="loseRetry">最初からやり直す</button>
+</div></div>
+
+<script>
+"use strict";
+// ===== 設定 =====
+const COLOR_CHOICES = [4,5,6,7,8,9,10];
+const DEFAULT_COLORS = 6;
+const TICK_MS = 45;          // 1ピクセル運ぶ間隔
+const COLS = 3;              // ブロックの列数
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const selColors = $('colors');
+COLOR_CHOICES.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n + '色'; selColors.appendChild(o); });
+
+let opts = load('opts', {colors: DEFAULT_COLORS, size: 28});
+selColors.value = opts.colors; $('size').value = opts.size;
+
+let srcData = null;   // 元画像（縮小済みdataURL）
+let G = null;         // 現在のゲーム
+let dpr = 1, VW = 0, VH = 0, L = {};
+
+function load(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } }
+function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+
+// ===== 乱数（シード付き） =====
+function rng(seed){ let s = seed >>> 0 || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+
+// ===== 画像 → 荒いドット絵 =====
+function pixelate(img, width, k){
+  const ar = img.height / img.width;
+  const W = width, H = Math.max(8, Math.min(Math.round(width * 1.45), Math.round(width * ar)));
+  // 縦長すぎる写真は中央を切り抜く
+  const srcAr = H / W;
+  let sx = 0, sy = 0, sw = img.width, sh = img.height;
+  if (img.height / img.width > srcAr){ sh = img.width * srcAr; sy = (img.height - sh) / 2; }
+  else { sw = img.height / srcAr; sx = (img.width - sw) / 2; }
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d'); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+  x.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
+  const d = x.getImageData(0, 0, W, H).data;
+  const px = [];
+  for (let i = 0; i < W * H; i++) px.push([d[i*4], d[i*4+1], d[i*4+2]]);
+  const {centers, labels} = kmeans(px, k);
+  // 明るさ順に並べ替え
+  const order = centers.map((c, i) => [i, c[0]*.3 + c[1]*.59 + c[2]*.11]).sort((a, b) => a[1] - b[1]).map(a => a[0]);
+  const remap = []; order.forEach((o, i) => remap[o] = i);
+  const palette = order.map(i => centers[i].map(v => Math.round(v)));
+  const cells = new Int8Array(W * H);
+  for (let i = 0; i < W * H; i++) cells[i] = remap[labels[i]];
+  return {W, H, palette, cells};
+}
+function dist2(a, b){ const r = a[0]-b[0], g = a[1]-b[1], bl = a[2]-b[2]; return r*r*.3 + g*g*.59 + bl*bl*.11; }
+function kmeans(px, k){
+  const R = rng(12345);
+  const centers = [px[Math.floor(R() * px.length)].slice()];
+  while (centers.length < k){ // k-means++ 初期化
+    const ds = px.map(p => Math.min(...centers.map(c => dist2(p, c))));
+    const sum = ds.reduce((a, b) => a + b, 0) || 1;
+    let r = R() * sum, i = 0;
+    for (; i < ds.length - 1; i++){ r -= ds[i]; if (r <= 0) break; }
+    centers.push(px[i].slice());
+  }
+  const labels = new Int32Array(px.length);
+  for (let it = 0; it < 14; it++){
+    for (let i = 0; i < px.length; i++){
+      let b = 0, bd = Infinity;
+      for (let j = 0; j < k; j++){ const dd = dist2(px[i], centers[j]); if (dd < bd){ bd = dd; b = j; } }
+      labels[i] = b;
+    }
+    const s = centers.map(() => [0,0,0,0]);
+    for (let i = 0; i < px.length; i++){ const t = s[labels[i]]; t[0]+=px[i][0]; t[1]+=px[i][1]; t[2]+=px[i][2]; t[3]++; }
+    s.forEach((t, j) => { if (t[3]) centers[j] = [t[0]/t[3], t[1]/t[3], t[2]/t[3]]; });
+  }
+  // 使われなかった色があっても色数は保つ（空の色は後で除外）
+  return {centers, labels};
+}
+
+// ===== 盤面ロジック =====
+// 外側（盤の外 or 運び出し済み）に面しているピクセルだけが運べる
+function exposed(cells, W, H, i){
+  const x = i % W, y = (i / W) | 0;
+  return x === 0 || y === 0 || x === W-1 || y === H-1 ||
+    cells[i-1] < 0 || cells[i+1] < 0 || cells[i-W] < 0 || cells[i+W] < 0;
+}
+// 色cの運べるピクセルのうち、穴（下中央）に近いものを選ぶ
+function pickPixel(cells, W, H, c){
+  let best = -1, bs = -Infinity;
+  const hx = (W - 1) / 2;
+  for (let i = cells.length - 1; i >= 0; i--){
+    if (cells[i] !== c || !exposed(cells, W, H, i)) continue;
+    const x = i % W, y = (i / W) | 0;
+    const s = y * 4 - Math.abs(x - hx);
+    if (s > bs){ bs = s; best = i; }
+  }
+  return best;
+}
+
+// 必ず解ける順番でブロックを作る（1つずつ運ぶシミュレーション）
+function makeBlocks(pz, seed){
+  const R = rng(seed);
+  const cells = Int8Array.from(pz.cells);
+  const W = pz.W, H = pz.H;
+  let left = cells.length;
+  const seq = [];
+  // 色cを今からいくつ続けて運べるか（最大cap）
+  const chain = (c, cap) => {
+    const tmp = Int8Array.from(cells); let n = 0;
+    while (n < cap){ const i = pickPixel(tmp, W, H, c); if (i < 0) break; tmp[i] = -1; n++; }
+    return n;
+  };
+  while (left > 0){
+    const m = pz.palette.map((_, c) => chain(c, 35));
+    let avail = m.map((v, c) => [c, v]).filter(a => a[1] >= 5);
+    if (!avail.length) avail = m.map((v, c) => [c, v]).filter(a => a[1] > 0);
+    const [c, maxN] = avail[Math.floor(R() * avail.length)];
+    let want = 5 * (2 + Math.floor(R() * 6)); // 10〜35
+    if (want > maxN) want = maxN >= 10 ? maxN - maxN % 5 : maxN;
+    let n = 0;
+    while (n < want){
+      const i = pickPixel(cells, W, H, c);
+      if (i < 0) break;
+      cells[i] = -1; n++; left--;
+    }
+    const prev = seq[seq.length - 1];
+    if (prev && prev.c === c && prev.n + n <= 40) prev.n += n;
+    else seq.push({c, n});
+  }
+  // 少しだけ順番を入れ替えて、考える余地を作る
+  for (let i = 0; i + 1 < seq.length; i += 2) if (R() < 0.35){ const t = seq[i]; seq[i] = seq[i+1]; seq[i+1] = t; }
+  const cols = Array.from({length: COLS}, () => []);
+  seq.forEach((b, i) => cols[i % COLS].push({c: b.c, n: b.n}));
+  return cols;
+}
+
+function newGame(pz, seed){
+  // 実際に使われている色だけ残す
+  const used = [...new Set(pz.cells)].sort((a, b) => a - b);
+  const map = []; used.forEach((c, i) => map[c] = i);
+  const p2 = {W: pz.W, H: pz.H, palette: used.map(c => pz.palette[c]), cells: pz.cells.map(c => map[c])};
+  seed = seed || (Date.now() & 0x7fffffff);
+  G = {
+    pz: p2, seed,
+    cells: Int8Array.from(p2.cells),
+    left: p2.cells.length,
+    cols: makeBlocks(p2, seed),
+    slots: Array(Math.max(3, Math.min(7, p2.palette.length - 1))).fill(null), // 色数-1 個のスロット
+    added: false,
+    fly: [], ants: [], pops: [],
+    over: false, won: false, acc: 0
+  };
+  hideOv(); layout();
+}
+
+// ===== レイアウト =====
+function layout(){
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  VW = cv.clientWidth; VH = cv.clientHeight;
+  cv.width = Math.round(VW * dpr); cv.height = Math.round(VH * dpr);
+  if (!G) return;
+  const pad = 14;
+  const blockSz = Math.min(76, (VW - 40) / 4.2);
+  const colsH = blockSz * 2.9;            // 列エリア
+  const slotN = G.slots.length;
+  const slotSz = Math.min(66, (VW - 24) / slotN - 8);
+  const boardMaxH = VH - colsH - slotSz - 120;
+  const cs = Math.max(4, Math.min((VW - pad * 2 - 24) / G.pz.W, boardMaxH / G.pz.H));
+  const bw = cs * G.pz.W, bh = cs * G.pz.H;
+  const board = {x: (VW - bw) / 2, y: 10 + 12, w: bw, h: bh, cs};
+  const hole = {x: VW / 2, y: board.y + bh + 12 + 38, r: 30};
+  const slotsY = hole.y + 44;
+  const sGap = 8, sW = slotN * slotSz + (slotN - 1) * sGap;
+  const slots = G.slots.map((_, i) => ({x: (VW - sW) / 2 + i * (slotSz + sGap), y: slotsY, s: slotSz}));
+  const colY = slotsY + slotSz + 22;
+  const cGap = 12, cW = COLS * blockSz + (COLS - 1) * cGap;
+  const cols = Array.from({length: COLS}, (_, i) => ({x: (VW - cW) / 2 + i * (blockSz + cGap), y: colY, s: blockSz}));
+  L = {board, hole, slots, cols};
+}
+
+// ===== 入力 =====
+cv.addEventListener('pointerdown', e => {
+  if (!G || G.over || G.won) return;
+  const r = cv.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  L.cols.forEach((c, ci) => {
+    if (x >= c.x && x <= c.x + c.s && y >= c.y && y <= c.y + c.s){
+      const col = G.cols[ci];
+      if (!col.length) return;
+      const si = G.slots.indexOf(null);
+      if (si < 0){ G.pops.push({x: c.x + c.s/2, y: c.y - 8, t: 0, text: 'スロットが満杯'}); return; }
+      const b = col.shift();
+      G.slots[si] = {c: b.c, n: b.n, done: 0, jump: 1, fx: c.x, fy: c.y};
+      buzz(10);
+    }
+  });
+});
+
+// ===== ゲーム進行 =====
+function step(){
+  if (!G || G.over || G.won) return;
+  let moved = false;
+  G.slots.forEach((s, si) => {
+    if (!s || s.n <= 0) return;
+    const i = pickPixel(G.cells, G.pz.W, G.pz.H, s.c);
+    if (i < 0) return;
+    G.cells[i] = -1; G.left--; s.n--; moved = true;
+    const b = L.board, x = i % G.pz.W, y = (i / G.pz.W) | 0;
+    const from = {x: b.x + (x + .5) * b.cs, y: b.y + (y + .5) * b.cs};
+    const slot = L.slots[si];
+    G.fly.push({x0: from.x, y0: from.y, x1: L.hole.x + (Math.random() - .5) * 26, y1: L.hole.y, t: 0, c: s.c,
+                ax: slot.x + slot.s / 2, ay: slot.y, size: b.cs});
+  });
+  G.slots.forEach((s, i) => { if (s && s.n <= 0) G.slots[i] = null; });
+  if (G.left <= 0 && !G.fly.length){ win(); return; }
+  if (!moved && !G.fly.length) checkStuck();
+}
+function checkStuck(){
+  if (G.slots.includes(null)) {
+    if (G.cols.some(c => c.length)) return;  // まだ置ける
+  }
+  const canMove = G.slots.some(s => s && s.n > 0 && pickPixel(G.cells, G.pz.W, G.pz.H, s.c) >= 0);
+  if (canMove) return;
+  G.over = true;
+  $('loseAdd').style.display = (G.added || G.slots.length >= 8) ? 'none' : 'block';
+  setTimeout(() => $('loseOv').classList.add('on'), 400);
+}
+function win(){
+  G.won = true;
+  const c = document.createElement('canvas'); c.width = G.pz.W * 8; c.height = G.pz.H * 8;
+  const x = c.getContext('2d');
+  G.pz.cells.forEach((v, i) => { const p = G.pz.palette[v]; x.fillStyle = `rgb(${p})`; x.fillRect((i % G.pz.W) * 8, ((i / G.pz.W) | 0) * 8, 8, 8); });
+  $('winImg').src = c.toDataURL();
+  buzz([20, 60, 20]);
+  setTimeout(() => $('winOv').classList.add('on'), 500);
+}
+function hideOv(){ $('winOv').classList.remove('on'); $('loseOv').classList.remove('on'); }
+function buzz(p){ try{ navigator.vibrate && navigator.vibrate(p); }catch(e){} }
+
+// ===== 描画 =====
+function rgb(p, k = 1){ return `rgb(${Math.min(255, p[0]*k)|0},${Math.min(255, p[1]*k)|0},${Math.min(255, p[2]*k)|0})`; }
+function textColor(p){ return (p[0]*.3 + p[1]*.59 + p[2]*.11) > 170 ? '#4a3420' : '#ffffff'; }
+function rr(x, y, w, h, r){ ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+
+function drawBlock(x, y, s, p, label, alpha = 1, glow = false){
+  ctx.globalAlpha = alpha;
+  if (glow){ ctx.fillStyle = '#fff'; rr(x - 4, y - 4, s + 8, s + 8, s * .24); ctx.fill(); }
+  ctx.fillStyle = rgb(p, .72); rr(x, y + s * .08, s, s * .92, s * .2); ctx.fill();
+  ctx.fillStyle = rgb(p); rr(x, y, s, s * .86, s * .2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; rr(x + s*.1, y + s*.07, s*.8, s*.25, s*.12); ctx.fill();
+  if (label !== ''){
+    ctx.font = `900 ${s * .42}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = s * .08; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.strokeText(label, x + s/2, y + s*.44);
+    ctx.fillStyle = textColor(p); ctx.fillText(label, x + s/2, y + s*.44);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawMystery(x, y, s){
+  ctx.fillStyle = '#5d4a9e'; rr(x, y + s*.08, s, s*.92, s*.2); ctx.fill();
+  ctx.fillStyle = '#7f6bc6'; rr(x, y, s, s*.86, s*.2); ctx.fill();
+  ctx.font = `900 ${s * .5}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff'; ctx.fillText('?', x + s/2, y + s*.45);
+}
+function drawAnt(x, y, sz, ang){
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  ctx.fillStyle = '#2b2530';
+  ctx.beginPath(); ctx.ellipse(-sz*.55, 0, sz*.42, sz*.32, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, 0, sz*.28, sz*.24, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(sz*.42, 0, sz*.26, sz*.24, 0, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#2b2530'; ctx.lineWidth = sz*.09;
+  for (const k of [-1, 1]) for (const o of [-.25, 0, .25]){
+    ctx.beginPath(); ctx.moveTo(o*sz, 0); ctx.lineTo(o*sz + sz*.15, k*sz*.55); ctx.stroke();
+  }
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sz*.5, -sz*.08, sz*.09, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function draw(dt){
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, VW, VH);
+  if (!G) return;
+  const {board: b, hole: h} = L;
+  // 盤
+  ctx.fillStyle = '#ead8c6'; rr(b.x - 12, b.y - 12, b.w + 24, b.h + 24, 18); ctx.fill();
+  const W = G.pz.W, cs = b.cs, gap = cs > 7 ? 1 : 0;
+  for (let i = 0; i < G.cells.length; i++){
+    const v = G.cells[i]; if (v < 0) continue;
+    const x = b.x + (i % W) * cs, y = b.y + ((i / W) | 0) * cs, p = G.pz.palette[v];
+    ctx.fillStyle = rgb(p, .8); ctx.fillRect(x + gap, y + gap, cs - gap, cs - gap);
+    ctx.fillStyle = rgb(p); ctx.fillRect(x + gap, y + gap, cs - gap - cs*.12, cs - gap - cs*.12);
+  }
+  // 穴
+  ctx.fillStyle = '#7a4a2a'; ctx.beginPath(); ctx.ellipse(h.x, h.y, h.r, h.r*.62, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#4f2d17'; ctx.beginPath(); ctx.ellipse(h.x, h.y + 3, h.r*.86, h.r*.5, 0, 0, Math.PI*2); ctx.fill();
+  // 運ばれていくピクセル（アリが運ぶ）
+  G.fly = G.fly.filter(f => f.t < 1);
+  for (const f of G.fly){
+    f.t += dt / 900;
+    const t = Math.min(1, f.t), e = t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
+    const x = f.x0 + (f.x1 - f.x0) * e, y = f.y0 + (f.y1 - f.y0) * e + Math.sin(t * Math.PI) * -20;
+    const sz = Math.max(6, f.size * (1 - t * .5));
+    const ang = Math.atan2(f.y1 - f.y0, f.x1 - f.x0);
+    drawAnt(x - Math.cos(ang) * sz * .4, y - Math.sin(ang) * sz * .4 + sz*.3, Math.max(9, sz * 1.1), ang);
+    ctx.globalAlpha = t > .9 ? (1 - t) * 10 : 1;
+    ctx.fillStyle = rgb(G.pz.palette[f.c]); ctx.fillRect(x - sz/2, y - sz/2, sz, sz);
+    ctx.globalAlpha = 1;
+  }
+  // スロット
+  G.slots.forEach((s, i) => {
+    const r = L.slots[i];
+    ctx.fillStyle = '#fffaf3'; rr(r.x, r.y, r.s, r.s, r.s * .18); ctx.fill();
+    if (!s) return;
+    if (s.jump > 0){ s.jump = Math.max(0, s.jump - dt / 220); }
+    const k = 1 - s.jump, x = s.fx + (r.x - s.fx) * k, y = s.fy + (r.y - s.fy) * k - Math.sin(k * Math.PI) * 40;
+    drawBlock(x, y, r.s, G.pz.palette[s.c], String(s.n));
+  });
+  // ブロックの列（先頭はタップ可能、2つ目は薄く数字、3つ目以降は？）
+  G.cols.forEach((col, ci) => {
+    const c = L.cols[ci];
+    for (let d = Math.min(2, col.length - 1); d >= 0; d--){
+      const y = c.y + d * c.s * .95;
+      if (d === 0) drawBlock(c.x, y, c.s, G.pz.palette[col[0].c], String(col[0].n), 1, true);
+      else if (d === 1) drawBlock(c.x, y, c.s, G.pz.palette[col[d].c], String(col[d].n), .55);
+      else drawMystery(c.x, y, c.s);
+    }
+    if (col.length > 3){
+      ctx.font = '700 13px system-ui'; ctx.fillStyle = '#8a6440'; ctx.textAlign = 'center';
+      ctx.fillText('あと' + (col.length - 3), c.x + c.s/2, c.y + c.s * 2.9 + 4);
+    }
+  });
+  // 残り
+  ctx.font = '800 14px system-ui'; ctx.fillStyle = '#8a6440'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(`のこり ${G.left}`, 12, 0);
+  // ポップ表示
+  G.pops = G.pops.filter(p => p.t < 1);
+  for (const p of G.pops){
+    p.t += dt / 1000;
+    ctx.globalAlpha = 1 - p.t; ctx.font = '800 15px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = '#c0392b';
+    ctx.fillText(p.text, p.x, p.y - p.t * 20); ctx.globalAlpha = 1;
+  }
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(100, now - last); last = now;
+  if (G && !G.over && !G.won){
+    G.acc += dt;
+    while (G.acc >= TICK_MS){ G.acc -= TICK_MS; step(); }
+  }
+  draw(dt);
+  requestAnimationFrame(frame);
+}
+
+// ===== 写真の読み込み =====
+function loadImage(src){ return new Promise((ok, ng) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ng; i.src = src; }); }
+async function startFromSrc(src, seed){
+  const img = await loadImage(src);
+  newGame(pixelate(img, +opts.size, +opts.colors), seed);
+}
+async function setPhoto(file){
+  const url = URL.createObjectURL(file);
+  try{
+    const img = await loadImage(url);
+    // 保存用に縮小
+    const m = 320, s = Math.min(1, m / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    srcData = c.toDataURL('image/jpeg', .9);
+    save('photo', srcData);
+    await startFromSrc(srcData);
+  } finally { URL.revokeObjectURL(url); }
+}
+// 写真がまだない時のサンプル絵
+function sampleSrc(){
+  const c = document.createElement('canvas'); c.width = 240; c.height = 300;
+  const x = c.getContext('2d');
+  const g = x.createLinearGradient(0, 0, 0, 300); g.addColorStop(0, '#8fd3ff'); g.addColorStop(1, '#e8f6ff');
+  x.fillStyle = g; x.fillRect(0, 0, 240, 300);
+  x.fillStyle = '#ffd23f'; x.beginPath(); x.arc(185, 60, 34, 0, 7); x.fill();
+  x.fillStyle = '#5cb85c'; x.fillRect(0, 230, 240, 70);
+  x.fillStyle = '#f4f1ea'; x.fillRect(100, 175, 40, 60);
+  x.fillStyle = '#e63946'; x.beginPath(); x.ellipse(120, 175, 70, 50, 0, Math.PI, 0); x.fill();
+  x.fillStyle = '#fff'; [[85,150,12],[130,140,15],[160,165,10]].forEach(([a,b,r]) => { x.beginPath(); x.arc(a, b, r, 0, 7); x.fill(); });
+  x.fillStyle = '#333'; x.beginPath(); x.arc(110, 200, 4, 0, 7); x.arc(130, 200, 4, 0, 7); x.fill();
+  return c.toDataURL();
+}
+
+$('pick').onclick = () => $('file').click();
+$('winPick').onclick = () => { hideOv(); $('file').click(); };
+$('file').onchange = e => { const f = e.target.files[0]; if (f) setPhoto(f); e.target.value = ''; };
+selColors.onchange = () => { opts.colors = +selColors.value; save('opts', opts); startFromSrc(srcData); };
+$('size').onchange = () => { opts.size = +$('size').value; save('opts', opts); startFromSrc(srcData); };
+$('retry').onclick = () => G && newGame(G.pz, G.seed);
+$('winRetry').onclick = () => newGame(G.pz);
+$('loseRetry').onclick = () => newGame(G.pz, G.seed);
+$('loseAdd').onclick = () => { G.added = true; G.slots.push(null); G.over = false; hideOv(); layout(); };
+window.addEventListener('resize', layout);
+
+srcData = load('photo', null) || sampleSrc();
+startFromSrc(srcData);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

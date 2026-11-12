@@ -532,9 +532,66 @@ function frame(now){
 
 // ===== 写真の読み込み =====
 function loadImage(src){ return new Promise((ok, ng) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ng; i.src = src; }); }
+// 写真からは必ず「10色・細かい」を1枚だけ作り（マスター）、
+// 粗さ・色数を変えるときはマスターから減らして作る。何度変えても元に戻れる
+const MASTER_SIZE = 36, MASTER_COLORS = 10;
+let master = null;
 async function startFromSrc(src, seed){
   const img = await loadImage(src);
-  newGame(pixelate(img, +opts.size, +opts.colors), seed);
+  master = pixelate(img, MASTER_SIZE, MASTER_COLORS);
+  save('master', {W: master.W, H: master.H, palette: master.palette, cells: Array.from(master.cells)});
+  startFromMaster(seed);
+}
+function startFromMaster(seed){
+  if (!master) return;
+  newGame(derive(master, +opts.size, +opts.colors), seed);
+}
+function loadMaster(){
+  const m = load('master', null);
+  if (!m) return null;
+  return {W: m.W, H: m.H, palette: m.palette, cells: Int8Array.from(m.cells)};
+}
+// マスターから粗く・少ない色のドット絵を作る
+function derive(m, size, k){
+  // 1) 粗くする：各マスに入るマスターのマスで、いちばん多い色を採用
+  let W = m.W, H = m.H, cells = m.cells;
+  if (size < m.W){
+    W = size; H = Math.max(6, Math.round(m.H * size / m.W));
+    const out = new Int8Array(W * H), cnt = new Float32Array(m.palette.length);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+      cnt.fill(0);
+      const x0 = x * m.W / W, x1 = (x + 1) * m.W / W, y0 = y * m.H / H, y1 = (y + 1) * m.H / H;
+      for (let sy = Math.floor(y0); sy < Math.ceil(y1); sy++) for (let sx = Math.floor(x0); sx < Math.ceil(x1); sx++){
+        const w = (Math.min(x1, sx + 1) - Math.max(x0, sx)) * (Math.min(y1, sy + 1) - Math.max(y0, sy));
+        if (w > 0) cnt[m.cells[sy * m.W + sx]] += w;
+      }
+      let best = 0; for (let c = 1; c < cnt.length; c++) if (cnt[c] > cnt[best]) best = c;
+      out[y * W + x] = best;
+    }
+    cells = out;
+  }
+  // 2) 色を減らす：マスターの10色を、使われている量で重みづけしてk色にまとめる
+  const n = m.palette.length, use = new Float32Array(n);
+  cells.forEach(c => use[c]++);
+  let groups = m.palette.map((_, i) => [i]);
+  const center = g => { let r = 0, gg = 0, b = 0, t = 0; g.forEach(i => { const w = use[i] + .01; r += m.palette[i][0] * w; gg += m.palette[i][1] * w; b += m.palette[i][2] * w; t += w; }); return [r / t, gg / t, b / t]; };
+  const weight = g => g.reduce((t, i) => t + use[i], 0);
+  // 使われていない色は先に除外
+  groups = groups.filter(g => use[g[0]] > 0);
+  while (groups.length > k){
+    // いちばん「近くて小さい」組を合体
+    let bi = 0, bj = 1, bc = Infinity;
+    for (let i = 0; i < groups.length; i++) for (let j = i + 1; j < groups.length; j++){
+      const cost = dist2(center(groups[i]), center(groups[j])) * Math.min(weight(groups[i]), weight(groups[j]));
+      if (cost < bc){ bc = cost; bi = i; bj = j; }
+    }
+    groups[bi] = groups[bi].concat(groups[bj]); groups.splice(bj, 1);
+  }
+  // 明るさ順に並べて新しいパレットに
+  const cs = groups.map(g => ({g, c: center(g)})).sort((a, b) => (a.c[0]*.3 + a.c[1]*.59 + a.c[2]*.11) - (b.c[0]*.3 + b.c[1]*.59 + b.c[2]*.11));
+  const map = new Int8Array(n);
+  cs.forEach((x, ni) => x.g.forEach(i => map[i] = ni));
+  return {W, H, palette: cs.map(x => x.c.map(v => Math.round(v))), cells: Int8Array.from(cells, c => map[c])};
 }
 async function setPhoto(file){ setPhotoUrl(URL.createObjectURL(file)); }
 async function setPhotoUrl(url){
@@ -591,19 +648,19 @@ function takePhoto(){
   if (window.Android && Android.takePhoto) Android.takePhoto(); else $('cam').click();
 }
 function openStart(){
-  $('startLast').style.display = load('photo', null) ? 'block' : 'none';
+  $('startLast').style.display = (load('master', null) || load('photo', null)) ? 'block' : 'none';
   $('startOv').classList.add('on');
 }
 function closeStart(){ $('startOv').classList.remove('on'); }
 $('pick').onclick = () => openStart();
 $('startCam').onclick = () => takePhoto();
 $('startPick').onclick = () => { closeStart(); $('file').click(); };
-$('startLast').onclick = () => { closeStart(); srcData = load('photo', null); startFromSrc(srcData); };
+$('startLast').onclick = () => { closeStart(); master = loadMaster(); if (master) startFromMaster(); else { srcData = load('photo', null); srcData && startFromSrc(srcData); } };
 $('cam').onchange = e => { const f = e.target.files[0]; if (f) setPhoto(f); else openStart(); e.target.value = ''; };
 $('winPick').onclick = () => { hideOv(); openStart(); };
 $('file').onchange = e => { const f = e.target.files[0]; if (f) setPhoto(f); e.target.value = ''; };
-selColors.onchange = () => { opts.colors = +selColors.value; save('opts', opts); srcData && startFromSrc(srcData); };
-$('size').onchange = () => { opts.size = +$('size').value; save('opts', opts); srcData && startFromSrc(srcData); };
+selColors.onchange = () => { opts.colors = +selColors.value; save('opts', opts); startFromMaster(); };
+$('size').onchange = () => { opts.size = +$('size').value; save('opts', opts); startFromMaster(); };
 $('retry').onclick = () => G && newGame(G.pz, G.seed);
 $('winRetry').onclick = () => newGame(G.pz);
 $('loseRetry').onclick = () => newGame(G.pz, G.seed);

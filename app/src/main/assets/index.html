@@ -19,6 +19,12 @@
   .card button{display:block;width:100%;height:48px;margin-top:10px;border:none;border-radius:24px;font-size:17px;font-weight:800;color:#fff;background:#f08a24;box-shadow:0 4px 0 #b55f0c}
   .card button.sub{background:#8a7bd8;box-shadow:0 4px 0 #5b4daa}
   #file{display:none}
+  .crop{text-align:center;color:#fff}
+  .crop p{margin:0 0 10px;font-weight:700}
+  #cropCv{touch-action:none;border-radius:6px;display:block;margin:0 auto}
+  .cb{display:flex;gap:10px;justify-content:center;margin-top:14px}
+  .cb button{height:46px;padding:0 18px;border:none;border-radius:23px;font-size:16px;font-weight:800;color:#fff;background:#f08a24;box-shadow:0 4px 0 #b55f0c}
+  .cb button.sub{background:#8a7bd8;box-shadow:0 4px 0 #5b4daa}
 </style>
 </head>
 <body>
@@ -36,6 +42,11 @@
 <canvas id="cv"></canvas>
 <input type="file" id="file" accept="image/*">
 
+<div class="ov" id="cropOv"><div class="crop">
+  <p>使いたい範囲を指でなぞって囲んでください</p>
+  <canvas id="cropCv"></canvas>
+  <div class="cb"><button class="sub" id="cropAll">写真全体を使う</button><button id="cropOk">この範囲で作る</button></div>
+</div></div>
 <div class="ov" id="winOv"><div class="card">
   <h2>クリア！</h2><img id="winImg" alt="">
   <button id="winRetry">もう一度</button>
@@ -88,8 +99,21 @@ function pixelate(img, width, k){
   x.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
   const d = x.getImageData(0, 0, W, H).data;
   const px = [];
-  for (let i = 0; i < W * H; i++) px.push([d[i*4], d[i*4+1], d[i*4+2]]);
-  const {centers, labels} = kmeans(px, k);
+  // 彩度とコントラストを少し上げて、ドット絵らしいはっきりした色に
+  for (let i = 0; i < W * H; i++){
+    let r = d[i*4], g = d[i*4+1], b = d[i*4+2];
+    const l = r*.3 + g*.59 + b*.11;
+    r = l + (r - l) * 1.3; g = l + (g - l) * 1.3; b = l + (b - l) * 1.3;
+    r = (r - 128) * 1.1 + 128; g = (g - 128) * 1.1 + 128; b = (b - 128) * 1.1 + 128;
+    px.push([r, g, b].map(v => Math.max(0, Math.min(255, v))));
+  }
+  // 中央ほど重く扱い、背景より被写体に色を割り当てる
+  const wts = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++){
+    const dx = ((i % W) + .5) / W - .5, dy = (((i / W) | 0) + .5) / H - .5;
+    wts[i] = 1 + 3 * Math.exp(-(dx*dx + dy*dy) / (2 * .2 * .2));
+  }
+  const {centers, labels} = kmeans(px, k, wts);
   // 明るさ順に並べ替え
   const order = centers.map((c, i) => [i, c[0]*.3 + c[1]*.59 + c[2]*.11]).sort((a, b) => a[1] - b[1]).map(a => a[0]);
   const remap = []; order.forEach((o, i) => remap[o] = i);
@@ -99,11 +123,11 @@ function pixelate(img, width, k){
   return {W, H, palette, cells};
 }
 function dist2(a, b){ const r = a[0]-b[0], g = a[1]-b[1], bl = a[2]-b[2]; return r*r*.3 + g*g*.59 + bl*bl*.11; }
-function kmeans(px, k){
+function kmeans(px, k, wts){
   const R = rng(12345);
   const centers = [px[Math.floor(R() * px.length)].slice()];
   while (centers.length < k){ // k-means++ 初期化
-    const ds = px.map(p => Math.min(...centers.map(c => dist2(p, c))));
+    const ds = px.map((p, i) => wts[i] * Math.min(...centers.map(c => dist2(p, c))));
     const sum = ds.reduce((a, b) => a + b, 0) || 1;
     let r = R() * sum, i = 0;
     for (; i < ds.length - 1; i++){ r -= ds[i]; if (r <= 0) break; }
@@ -117,7 +141,7 @@ function kmeans(px, k){
       labels[i] = b;
     }
     const s = centers.map(() => [0,0,0,0]);
-    for (let i = 0; i < px.length; i++){ const t = s[labels[i]]; t[0]+=px[i][0]; t[1]+=px[i][1]; t[2]+=px[i][2]; t[3]++; }
+    for (let i = 0; i < px.length; i++){ const t = s[labels[i]], w = wts[i]; t[0]+=px[i][0]*w; t[1]+=px[i][1]*w; t[2]+=px[i][2]*w; t[3]+=w; }
     s.forEach((t, j) => { if (t[3]) centers[j] = [t[0]/t[3], t[1]/t[3], t[2]/t[3]]; });
   }
   // 使われなかった色があっても色数は保つ（空の色は後で除外）
@@ -406,16 +430,50 @@ async function startFromSrc(src, seed){
 }
 async function setPhoto(file){
   const url = URL.createObjectURL(file);
-  try{
-    const img = await loadImage(url);
-    // 保存用に縮小
-    const m = 320, s = Math.min(1, m / Math.max(img.width, img.height));
-    const c = document.createElement('canvas'); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
-    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  let img;
+  try { img = await loadImage(url); } catch(e){ URL.revokeObjectURL(url); return; }
+  openCrop(img, async rect => {
+    // 選んだ範囲だけを保存（最大360px）
+    const m = 360, s = Math.min(1, m / Math.max(rect.w, rect.h));
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(rect.w * s)); c.height = Math.max(1, Math.round(rect.h * s));
+    c.getContext('2d').drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
     srcData = c.toDataURL('image/jpeg', .9);
     save('photo', srcData);
     await startFromSrc(srcData);
-  } finally { URL.revokeObjectURL(url); }
+  });
+}
+// ===== 切り抜き画面：指でなぞって範囲を選ぶ =====
+function openCrop(img, done){
+  const ov = $('cropOv'), cc = $('cropCv'), x = cc.getContext('2d');
+  ov.classList.add('on');
+  const r = window.devicePixelRatio || 1;
+  const maxW = window.innerWidth - 24, maxH = window.innerHeight - 170;
+  const sc = Math.min(maxW / img.width, maxH / img.height);
+  const w = img.width * sc, h = img.height * sc;
+  cc.style.width = w + 'px'; cc.style.height = h + 'px'; cc.width = w * r; cc.height = h * r;
+  let sel = {x: 0, y: 0, w, h}, start = null;
+  const paint = () => {
+    x.setTransform(r, 0, 0, r, 0, 0);
+    x.drawImage(img, 0, 0, w, h);
+    x.fillStyle = 'rgba(0,0,0,.5)';
+    x.fillRect(0, 0, w, sel.y); x.fillRect(0, sel.y + sel.h, w, h - sel.y - sel.h);
+    x.fillRect(0, sel.y, sel.x, sel.h); x.fillRect(sel.x + sel.w, sel.y, w - sel.x - sel.w, sel.h);
+    x.strokeStyle = '#fff'; x.lineWidth = 2; x.setLineDash([6, 4]); x.strokeRect(sel.x, sel.y, sel.w, sel.h); x.setLineDash([]);
+  };
+  const pos = e => { const b = cc.getBoundingClientRect(); return {x: Math.max(0, Math.min(w, e.clientX - b.left)), y: Math.max(0, Math.min(h, e.clientY - b.top))}; };
+  cc.onpointerdown = e => { cc.setPointerCapture(e.pointerId); start = pos(e); sel = {x: start.x, y: start.y, w: 0, h: 0}; paint(); };
+  cc.onpointermove = e => { if (!start) return; const p = pos(e);
+    sel = {x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y)}; paint(); };
+  cc.onpointerup = () => { start = null; if (sel.w < 20 || sel.h < 20){ sel = {x: 0, y: 0, w, h}; paint(); } };
+  paint();
+  const finish = useSel => {
+    ov.classList.remove('on');
+    const s2 = useSel ? sel : {x: 0, y: 0, w, h};
+    done({x: s2.x / sc, y: s2.y / sc, w: s2.w / sc, h: s2.h / sc});
+  };
+  $('cropOk').onclick = () => finish(true);
+  $('cropAll').onclick = () => finish(false);
 }
 // 写真がまだない時のサンプル絵
 function sampleSrc(){

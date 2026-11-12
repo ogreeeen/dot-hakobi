@@ -402,17 +402,21 @@ function drawMystery(x, y, s){
   ctx.font = `900 ${s * .5}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillStyle = '#fff'; ctx.fillText('?', x + s/2, y + s*.45);
 }
-function drawAnt(x, y, sz, ang){
+// アリは運ぶ色と同じ色。明るい色でも見えるよう、暗めのふちどりをつける
+function drawAnt(x, y, sz, ang, p){
+  p = p || [43, 37, 48];
+  const body = rgb(p), edge = rgb(p, .55);
   ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
-  ctx.fillStyle = '#2b2530';
-  ctx.beginPath(); ctx.ellipse(-sz*.55, 0, sz*.42, sz*.32, 0, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(0, 0, sz*.28, sz*.24, 0, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(sz*.42, 0, sz*.26, sz*.24, 0, 0, Math.PI*2); ctx.fill();
-  ctx.strokeStyle = '#2b2530'; ctx.lineWidth = sz*.09;
+  ctx.strokeStyle = edge; ctx.lineWidth = sz*.09;
   for (const k of [-1, 1]) for (const o of [-.25, 0, .25]){
     ctx.beginPath(); ctx.moveTo(o*sz, 0); ctx.lineTo(o*sz + sz*.15, k*sz*.55); ctx.stroke();
   }
-  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sz*.5, -sz*.08, sz*.09, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = body; ctx.lineWidth = Math.max(1, sz*.07);
+  for (const [cx, rx, ry] of [[-sz*.55, sz*.42, sz*.32], [0, sz*.28, sz*.24], [sz*.42, sz*.26, sz*.24]]){
+    ctx.beginPath(); ctx.ellipse(cx, 0, rx, ry, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  }
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sz*.5, -sz*.08, sz*.1, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(sz*.53, -sz*.08, sz*.05, 0, Math.PI*2); ctx.fill();
   ctx.restore();
 }
 
@@ -440,7 +444,7 @@ function draw(dt){
   for (const a of G.ants){
     const p = posOn(a.phase === 0 ? a.go : a.back, a.d);
     const wob = Math.sin(a.d * .35) * .12;
-    drawAnt(p.x, p.y, antSz, p.ang + wob);
+    drawAnt(p.x, p.y, antSz, p.ang + wob, G.pz.palette[a.c]);
     if (a.phase === 1){
       const q = Math.max(5, cs * .8);
       ctx.fillStyle = rgb(G.pz.palette[a.c]);

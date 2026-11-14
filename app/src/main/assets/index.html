@@ -181,7 +181,7 @@ function makeBlocks(pz, seed){
   const R = rng(seed);
   const cells = Int8Array.from(pz.cells);
   const W = pz.W, H = pz.H;
-  let left = cells.length;
+  let left = cells.filter(c => c >= 0).length;    // 背景を消したマス（-1）は数えない
   const seq = [];
   // 色cを今からいくつ続けて運べるか（最大cap）
   const chain = (c, cap) => {
@@ -190,11 +190,13 @@ function makeBlocks(pz, seed){
     return n;
   };
   while (left > 0){
-    const m = pz.palette.map((_, c) => chain(c, 35));
-    let avail = m.map((v, c) => [c, v]).filter(a => a[1] >= 5);
+    const m = pz.palette.map((_, c) => chain(c, 50));
+    // なるべく大きな数のブロックを作る：続けて20個以上運べる色を優先
+    let avail = m.map((v, c) => [c, v]).filter(a => a[1] >= 20);
+    if (!avail.length) avail = m.map((v, c) => [c, v]).filter(a => a[1] >= 10);
     if (!avail.length) avail = m.map((v, c) => [c, v]).filter(a => a[1] > 0);
     const [c, maxN] = avail[Math.floor(R() * avail.length)];
-    let want = 5 * (2 + Math.floor(R() * 6)); // 10〜35
+    let want = 5 * (4 + Math.floor(R() * 6)); // 20〜45
     if (want > maxN) want = maxN >= 10 ? maxN - maxN % 5 : maxN;
     let n = 0;
     while (n < want){
@@ -202,8 +204,12 @@ function makeBlocks(pz, seed){
       if (i < 0) break;
       cells[i] = -1; n++; left--;
     }
+    // 小さい端数は、少し前の同じ色のブロックにまとめる（1や5のような小さい数を減らす）
     const prev = seq[seq.length - 1];
-    if (prev && prev.c === c && prev.n + n <= 40) prev.n += n;
+    let near = null;
+    if (n < 10) for (let k = seq.length - 1; k >= Math.max(0, seq.length - 4); k--) if (seq[k].c === c && seq[k].n + n <= 60){ near = seq[k]; break; }
+    if (prev && prev.c === c && prev.n + n <= 60) prev.n += n;
+    else if (near) near.n += n;
     else seq.push({c, n});
   }
   // 少しだけ順番を入れ替えて、考える余地を作る
@@ -213,17 +219,28 @@ function makeBlocks(pz, seed){
   return cols;
 }
 
+// 何通りか作ってみて、小さい数のブロックがいちばん少ないものを使う
+function bestBlocks(pz, seed){
+  let best = null, bs = Infinity;
+  for (let k = 0; k < 10; k++){
+    const cols = makeBlocks(pz, seed + k * 7919);
+    const ns = cols.flat().map(b => b.n);
+    const score = ns.filter(n => n < 10).length * 10 + ns.filter(n => n < 15).length * 3 + ns.length * .2;
+    if (score < bs){ bs = score; best = cols; }
+  }
+  return best;
+}
 function newGame(pz, seed){
   // 実際に使われている色だけ残す
-  const used = [...new Set(pz.cells)].sort((a, b) => a - b);
+  const used = [...new Set(pz.cells)].filter(c => c >= 0).sort((a, b) => a - b);
   const map = []; used.forEach((c, i) => map[c] = i);
-  const p2 = {W: pz.W, H: pz.H, palette: used.map(c => pz.palette[c]), cells: pz.cells.map(c => map[c])};
+  const p2 = {W: pz.W, H: pz.H, palette: used.map(c => pz.palette[c]), cells: pz.cells.map(c => c < 0 ? -1 : map[c])};
   seed = seed || (Date.now() & 0x7fffffff);
   G = {
     pz: p2, seed,
     cells: Int8Array.from(p2.cells),
-    left: p2.cells.length,
-    cols: makeBlocks(p2, seed),
+    left: p2.cells.filter(c => c >= 0).length,
+    cols: bestBlocks(p2, seed),
     slots: Array(Math.max(3, Math.min(7, p2.palette.length - 1))).fill(null), // 色数-1 個のスロット
     added: false,
     ants: [], pops: [], res: new Uint8Array(p2.cells.length),
@@ -544,7 +561,33 @@ async function startFromSrc(src, seed){
 }
 function startFromMaster(seed){
   if (!master) return;
-  newGame(derive(master, +opts.size, +opts.colors), seed);
+  newGame(removeWhiteBg(derive(master, +opts.size, +opts.colors)), seed);
+}
+// 背景が真っ白なら、外側からつながっている白いマスだけ先に消しておく
+function removeWhiteBg(pz){
+  const {W, H, palette} = pz, cells = Int8Array.from(pz.cells);
+  const white = palette.map(p => Math.min(...p) >= 210 && Math.max(...p) - Math.min(...p) <= 35);
+  let edge = 0, edgeWhite = 0;
+  for (let i = 0; i < W * H; i++){
+    const x = i % W, y = (i / W) | 0;
+    if (x && y && x < W - 1 && y < H - 1) continue;
+    edge++; if (white[cells[i]]) edgeWhite++;
+  }
+  if (edgeWhite / edge < .6) return pz;            // 白い背景ではない
+  const q = [];
+  for (let i = 0; i < W * H; i++){
+    const x = i % W, y = (i / W) | 0;
+    if ((x === 0 || y === 0 || x === W - 1 || y === H - 1) && white[cells[i]]){ cells[i] = -1; q.push(i); }
+  }
+  while (q.length){
+    const i = q.pop(), x = i % W, y = (i / W) | 0;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const j = ny * W + nx; if (cells[j] >= 0 && white[cells[j]]){ cells[j] = -1; q.push(j); }
+    }
+  }
+  if (cells.filter(c => c >= 0).length < W * H * .1) return pz;   // ほぼ全部消えるなら、そのまま
+  return {W, H, palette, cells};
 }
 function loadMaster(){
   const m = load('master', null);
